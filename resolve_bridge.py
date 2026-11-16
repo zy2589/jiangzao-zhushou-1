@@ -378,7 +378,7 @@ def _resolve_render_staging_dir(
     client: ResolveConsoleBridge,
     timeline_items: list[dict],
 ) -> Path:
-    """Render beside online source media so Resolve can resolve the folder, then move WAV to app cache."""
+    """Use Resolve's Utility script storage first, then move the rendered WAV to app cache."""
     try:
         config = json.loads(BRIDGE_CONFIG.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -389,9 +389,11 @@ def _resolve_render_staging_dir(
     if not roots:
         roots = [str(Path.home() / "Videos")]
 
-    # Source media folders are already known to the active Resolve project. Prefer those paths;
-    # the finished WAV is moved to ResolveCache immediately after rendering.
-    candidates: list[Path] = []
+    # Match the Windows Resolve script workflow: render under Scripts:/Utility,
+    # which Resolve itself maps as a supported script-owned output location.
+    candidates: list[Path] = [RESOLVE_USER_SCRIPTS / "DenoiseAssistant" / "temp"]
+
+    # Fallbacks for installations where the Utility folder is not writable.
     seen_source_dirs: set[str] = set()
     for item in timeline_items[:3]:
         if not isinstance(item, dict) or not item.get("__handle__"):
@@ -412,8 +414,6 @@ def _resolve_render_staging_dir(
                 seen_source_dirs.add(key)
                 candidates.append(source_dir)
 
-    # Use Resolve's own Utility-script storage if the source media is read-only.
-    candidates.append(RESOLVE_USER_SCRIPTS / "DenoiseAssistant" / "temp")
     for value in roots:
         root_text = os.path.expandvars(os.path.expanduser(str(value))).strip()
         if root_text:
@@ -594,7 +594,8 @@ def render_audio_track_to_wav(
         if progress:
             progress("正在由 Resolve 导出 WAV", 0, False)
         ensure_same_timeline()
-        if not client.call("project", "StartRendering", [[job_id]]):
+        # The Windows Resolve script pattern starts the queued job by its ID.
+        if not client.call("project", "StartRendering", [job_id]):
             raise ResolveBridgeError(f"Resolve 无法启动 WAV 导出任务。自动选择的输出目录：\n{staging_dir}")
 
         started = time.monotonic()
