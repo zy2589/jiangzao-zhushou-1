@@ -4,7 +4,7 @@ Windows 本地音频与视频降噪工具，不连接 DaVinci Resolve。
 
 ## 单文件版
 
-双击 `dist\降噪助手.exe` 即可启动。EXE 内含 Python 运行环境、DeepFilterNet、FFmpeg、网页下载器和网页解析运行时，不要求另外安装这些依赖。首次启动会解压到 Windows 临时目录，启动时间稍长。
+双击 `dist\降噪助手.exe` 即可启动。EXE 内含 Python 运行环境、DeepFilterNet、FFmpeg、网页下载器和网页解析运行时，不要求另外安装这些依赖。第一次在新电脑启动时会自动解压到 `%LOCALAPPDATA%\DenoiseAssistant\Runtime`；以后复用这个缓存快速启动。本工作区构建时也会预热当前电脑的缓存。
 
 在 Windows x64 构建环境中运行：
 
