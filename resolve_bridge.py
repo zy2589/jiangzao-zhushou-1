@@ -375,7 +375,7 @@ def _render_job(client: ResolveConsoleBridge, job_id: str) -> dict | None:
 
 
 def _resolve_render_staging_dir() -> Path:
-    """Pick a writable Resolve bridge output root; the WAV is moved into the app cache afterward."""
+    """Use Resolve's own Utility-script storage for the render, then move WAV into the app cache."""
     try:
         config = json.loads(BRIDGE_CONFIG.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -386,15 +386,18 @@ def _resolve_render_staging_dir() -> Path:
     if not roots:
         roots = [str(Path.home() / "Videos")]
 
-    failures: list[str] = []
+    # Resolve scripts commonly render to their Scripts:/Utility/<tool>/temp folder.
+    # This Utility root is also where this assistant's Workspace script is installed.
+    candidates = [RESOLVE_USER_SCRIPTS / "DenoiseAssistant" / "temp"]
     for value in roots:
         root_text = os.path.expandvars(os.path.expanduser(str(value))).strip()
-        if not root_text:
+        if root_text:
+            candidates.append(Path(root_text))
+
+    failures: list[str] = []
+    for staging in candidates:
+        if not staging.is_absolute():
             continue
-        root = Path(root_text)
-        if not root.is_absolute():
-            continue
-        staging = root / "ResolveDenoiseStaging"
         try:
             staging.mkdir(parents=True, exist_ok=True)
             probe = staging / f".write_check_{uuid.uuid4().hex}"
@@ -407,8 +410,8 @@ def _resolve_render_staging_dir() -> Path:
     detail = "\n".join(failures[:3])
     suffix = f"\n{detail}" if detail else ""
     raise ResolveBridgeError(
-        "助手无法在 Resolve 桥接配置的输出目录中建立临时渲染位置。"
-        f"请检查本机 Videos 输出目录权限。{suffix}"
+        "助手无法在 Resolve Utility 临时目录或桥接输出目录中建立渲染位置。"
+        f"{suffix}"
     )
 
 
@@ -541,7 +544,9 @@ def render_audio_track_to_wav(
             raise ResolveBridgeError("Resolve 无法加载内置“Audio Only”预设，未开始渲染。")
         if not client.call("project", "SetCurrentRenderFormatAndCodec", [audio_format, audio_codec]):
             raise ResolveBridgeError("Resolve 无法切换到 WAV / Linear PCM 输出格式。")
-        staging_target = str(staging_dir).replace("\\", "/").rstrip("/") + "/"
+        staging_target = os.path.normpath(str(staging_dir))
+        if os.name == "nt":
+            staging_target = staging_target.rstrip("\\/") + "\\"
         render_settings = {
             "SelectAllFrames": False,
             "MarkIn": mark_in,
