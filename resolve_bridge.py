@@ -534,22 +534,6 @@ def render_audio_track_to_wav(
     job_id: str | None = None
     try:
         _snapshot_id, snapshot = _snapshot_render_settings(client)
-        wav_formats = client.call("project", "GetAudioRenderFormats") or {}
-        if not isinstance(wav_formats, dict) or "wav" not in {str(ext).lower() for ext in wav_formats.values()}:
-            raise ResolveBridgeError("此 Resolve 版本没有提供可脚本调用的 WAV 音频导出格式。")
-        audio_format = next(
-            (str(value) for label, value in wav_formats.items() if str(value).lower() == "wav"),
-            None,
-        )
-        wav_codecs = client.call("project", "GetAudioRenderCodecs", ["wav"]) or {}
-        audio_codec = next(
-            (str(value) for label, value in wav_codecs.items()
-             if "linear pcm" in str(label).lower()),
-            None,
-        ) if isinstance(wav_codecs, dict) else None
-        if not audio_format or not audio_codec:
-            raise ResolveBridgeError("Resolve 没有提供 WAV / Linear PCM 编码器。")
-
         current_format_codec = client.call("project", "GetCurrentRenderFormatAndCodec") or {}
 
         track_count = int(client.call(timeline, "GetTrackCount", ["audio"]) or 0)
@@ -567,11 +551,11 @@ def render_audio_track_to_wav(
         ensure_same_timeline()
         if not client.call("project", "LoadRenderPreset", ["Audio Only"]):
             raise ResolveBridgeError("Resolve 无法加载内置“Audio Only”预设，未开始渲染。")
-        if not client.call("project", "SetCurrentRenderFormatAndCodec", [audio_format, audio_codec]):
-            raise ResolveBridgeError("Resolve 无法切换到 WAV / Linear PCM 输出格式。")
-        staging_target = os.path.normpath(str(staging_dir))
-        if os.name == "nt":
-            staging_target = staging_target.rstrip("\\/") + "\\"
+        # TargetDir is the directory itself. Resolve's scripting examples pass it
+        # without a trailing separator; keep Windows' native absolute path form.
+        staging_target = str(staging_dir.resolve(strict=True))
+        if not Path(staging_target).is_dir():
+            raise ResolveBridgeError(f"Resolve WAV 临时目录不存在：\n{staging_target}")
         render_settings = {
             "SelectAllFrames": False,
             "MarkIn": mark_in,
@@ -580,9 +564,10 @@ def render_audio_track_to_wav(
             "CustomName": staging_destination.stem,
             "ExportVideo": False,
             "ExportAudio": True,
-            "AudioCodec": audio_codec,
+            "AudioCodec": "Linear PCM",
             "AudioBitDepth": 16,
             "AudioSampleRate": 48000,
+            "FileExtension": "wav",
         }
         if not client.call("project", "SetRenderSettings", [render_settings]):
             raise ResolveBridgeError("Resolve 拒绝了 WAV 导出设置，未开始降噪。")
@@ -670,7 +655,11 @@ def render_audio_track_to_wav(
             _restore_render_settings(client, snapshot)
         except ResolveBridgeError:
             pass
-        if isinstance(current_format_codec, dict) and current_format_codec.get("format"):
+        if (
+            isinstance(current_format_codec, dict)
+            and current_format_codec.get("format")
+            and str(current_format_codec.get("format")).lower() != "unknown"
+        ):
             try:
                 client.call("project", "SetCurrentRenderFormatAndCodec", [
                     str(current_format_codec.get("format")),
