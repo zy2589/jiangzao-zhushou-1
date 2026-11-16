@@ -462,6 +462,7 @@ def render_audio_track_to_wav(
         render_mode_before = None
 
     snapshot: dict | None = None
+    current_format_codec: dict = {}
     track_states: dict[int, bool] = {}
     job_id: str | None = None
     try:
@@ -469,14 +470,20 @@ def render_audio_track_to_wav(
         wav_formats = client.call("project", "GetAudioRenderFormats") or {}
         if not isinstance(wav_formats, dict) or "wav" not in {str(ext).lower() for ext in wav_formats.values()}:
             raise ResolveBridgeError("此 Resolve 版本没有提供可脚本调用的 WAV 音频导出格式。")
+        audio_format = next(
+            (str(value) for label, value in wav_formats.items() if str(value).lower() == "wav"),
+            None,
+        )
         wav_codecs = client.call("project", "GetAudioRenderCodecs", ["wav"]) or {}
         audio_codec = next(
             (str(value) for label, value in wav_codecs.items()
              if "linear pcm" in str(label).lower()),
             None,
         ) if isinstance(wav_codecs, dict) else None
-        if not audio_codec:
+        if not audio_format or not audio_codec:
             raise ResolveBridgeError("Resolve 没有提供 WAV / Linear PCM 编码器。")
+
+        current_format_codec = client.call("project", "GetCurrentRenderFormatAndCodec") or {}
 
         track_count = int(client.call(timeline, "GetTrackCount", ["audio"]) or 0)
         for index in range(1, track_count + 1):
@@ -491,6 +498,8 @@ def render_audio_track_to_wav(
                 raise ResolveBridgeError("Resolve 无法切换到单文件渲染模式。")
 
         ensure_same_timeline()
+        if not client.call("project", "SetCurrentRenderFormatAndCodec", [audio_format, audio_codec]):
+            raise ResolveBridgeError("Resolve 无法切换到 WAV / Linear PCM 输出格式。")
         render_settings = {
             "SelectAllFrames": False,
             "MarkIn": mark_in,
@@ -517,7 +526,9 @@ def render_audio_track_to_wav(
         if job.get("IsExportVideo") or job.get("IsExportAudio") is not True:
             raise ResolveBridgeError("Resolve 没有接受“纯音频 WAV”设置，已取消本次渲染。")
         job_target = str(job.get("TargetDir") or "")
-        if job_target and os.path.normcase(os.path.normpath(job_target)) != os.path.normcase(
+        if not job_target:
+            raise ResolveBridgeError(f"Resolve 没有接受 WAV 输出目录：\n{destination.parent}")
+        if os.path.normcase(os.path.normpath(job_target)) != os.path.normcase(
             os.path.normpath(str(destination.parent))
         ):
             raise ResolveBridgeError("Resolve 渲染任务的输出目录与临时 WAV 目录不一致，已取消渲染。")
@@ -528,7 +539,7 @@ def render_audio_track_to_wav(
             progress("正在由 Resolve 导出 WAV", 0, False)
         ensure_same_timeline()
         if not client.call("project", "StartRendering", [[job_id]]):
-            raise ResolveBridgeError("Resolve 无法启动 WAV 导出任务。")
+            raise ResolveBridgeError(f"Resolve 无法启动 WAV 导出任务。请检查输出目录：\n{destination.parent}")
 
         started = time.monotonic()
         while True:
@@ -579,6 +590,14 @@ def render_audio_track_to_wav(
             _restore_render_settings(client, snapshot)
         except ResolveBridgeError:
             pass
+        if isinstance(current_format_codec, dict) and current_format_codec.get("format"):
+            try:
+                client.call("project", "SetCurrentRenderFormatAndCodec", [
+                    str(current_format_codec.get("format")),
+                    str(current_format_codec.get("codec") or ""),
+                ])
+            except ResolveBridgeError:
+                pass
         if render_mode_before is not None:
             try:
                 client.call("project", "SetCurrentRenderMode", [int(render_mode_before)])

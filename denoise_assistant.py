@@ -636,7 +636,7 @@ class DenoiseAssistant:
                                                    style="Denoise.Horizontal.TProgressbar")
         self.resolve_progressbar.pack(side="left", fill="x", expand=True)
         self.resolve_status = tk.Label(self.timeline_page,
-                                       text="Resolve 先导出所选音轨 WAV；降噪后按时间线位置回填新轨道。",
+                                       text="原始 WAV 与降噪 WAV 保存在助手目录 ResolveCache；降噪后按时间线位置回填新轨道（A1 会回填到 A2）。",
                                        bg=self.BG, fg=self.MUTED, justify="left", wraplength=355,
                                        font=("Microsoft YaHei UI", 9))
         self.resolve_status.pack(anchor="w", fill="x", pady=(0, 4))
@@ -644,7 +644,7 @@ class DenoiseAssistant:
         self.cache_card.pack(fill="x", pady=(0, 3))
         self._button(self.cache_card, "删除七天前的缓存", self.clear_cache).pack(fill="x", padx=8, pady=(3, 2))
         tk.Label(self.cache_card,
-                 text="Resolve 降噪 WAV 单独缓存；只清除超过七天的文件。",
+                 text="助手目录 ResolveCache 保存原始和降噪 WAV；只清除超过七天的缓存。",
                  bg=self.BG, fg=self.MUTED, justify="left", wraplength=345,
                  font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=8, pady=(0, 3))
 
