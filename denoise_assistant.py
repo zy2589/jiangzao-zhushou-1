@@ -546,7 +546,7 @@ def _blend_audio(original_wav: Path, filtered_wav: Path, output_wav: Path, stren
 
 def process_audio_file(source: Path, destination: Path, settings: dict) -> Path:
     ffmpeg = ffmpeg_path(settings)
-    strength = int(settings.get("strength", 35))
+    strength = int(settings.get("strength", 75))
     with tempfile.TemporaryDirectory(prefix="denoise-") as work:
         workdir = Path(work)
         prepared = workdir / "source_48k.wav"
@@ -561,7 +561,7 @@ def process_audio_file(source: Path, destination: Path, settings: dict) -> Path:
 
 def process_video_file(source: Path, destination: Path, settings: dict) -> Path:
     ffmpeg = ffmpeg_path(settings)
-    strength = int(settings.get("strength", 35))
+    strength = int(settings.get("strength", 75))
     with tempfile.TemporaryDirectory(prefix="denoise-video-") as work:
         workdir = Path(work)
         prepared = workdir / "source_48k.wav"
@@ -631,12 +631,13 @@ class DenoiseAssistant:
         self.root.protocol("WM_DELETE_WINDOW", self.exit_assistant)
         self._build_ui()
         self._refresh_engine_status()
+        self._fit_window_to_content()
         self.root.after(150, self._drain_queue)
 
     def _configure_window(self) -> None:
         self.root.title("降噪助手")
-        self.root.geometry("390x662")
-        self.root.minsize(370, 622)
+        self.root.geometry("390x600")
+        self.root.minsize(370, 560)
         self.root.resizable(False, False)
         self.root.configure(bg=self.BG)
         self.root.attributes("-topmost", True)
@@ -661,6 +662,15 @@ class DenoiseAssistant:
         style.configure("Denoise.Horizontal.TProgressbar", troughcolor="#454545",
                         background="#eeeeee", bordercolor="#454545",
                         lightcolor="#eeeeee", darkcolor="#eeeeee", thickness=7)
+
+    def _fit_window_to_content(self) -> None:
+        self.root.update_idletasks()
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        width = min(max(390, self.root.winfo_reqwidth()), max(370, screen_w - 40))
+        height = min(max(560, self.root.winfo_reqheight()), max(560, screen_h - 80))
+        self.root.geometry(f"{width}x{height}")
+        self.root.minsize(min(width, 370), min(height, 560))
 
     def _card(self, parent: tk.Widget, title: str | None = None) -> tk.Frame:
         frame = tk.Frame(parent, bg=self.PANEL, highlightbackground=self.BORDER, highlightthickness=1)
@@ -735,7 +745,7 @@ class DenoiseAssistant:
 
         media_card = self._card(body, "本地音频降噪")
         self.local_card = media_card
-        media_card.pack(fill="both", expand=True)
+        media_card.pack(fill="x", expand=False)
         tk.Label(media_card, text="拖入或添加音视频素材；视频保留画面并替换音轨。",
                  bg=self.PANEL, fg=self.MUTED, justify="left", wraplength=345,
                  font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=8, pady=(0, 4))
@@ -1076,6 +1086,8 @@ class DenoiseAssistant:
                 kind, value = self.output_queue.get_nowait()
                 if kind == "status":
                     self.status_var.set(value)
+                    visible_status = value.split("：", 1)[0]
+                    self.local_progress_label.configure(text=visible_status)
                 elif kind == "job_progress":
                     self._set_job_progress(*value)
                 elif kind == "link_progress":
@@ -1092,8 +1104,7 @@ class DenoiseAssistant:
                         self.local_progressbar.configure(mode="determinate", maximum=100, value=0)
                     total = len(successes) + len(failures)
                     self._set_job_progress(total, total)
-                    if failures:
-                        self.local_progress_label.configure(text=f"完成 {len(successes)}/{total}")
+                    self.local_progress_label.configure(text=f"完成 {len(successes)}/{total}")
                     self.status_var.set(f"处理完成：{len(successes)} 个成功，{len(failures)} 个失败。")
                     if self.auto_close_var.get() and successes and not failures:
                         self.root.iconify()
