@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 import secrets
+import shutil
 import socket
 import subprocess
 import time
@@ -373,6 +374,44 @@ def _render_job(client: ResolveConsoleBridge, job_id: str) -> dict | None:
     return next((item for item in jobs if isinstance(item, dict) and item.get("JobId") == job_id), None)
 
 
+def _resolve_render_staging_dir() -> Path:
+    """Pick a writable Resolve bridge output root; the WAV is moved into the app cache afterward."""
+    try:
+        config = json.loads(BRIDGE_CONFIG.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        config = {}
+    roots = config.get("allowed_output_roots") or []
+    if not isinstance(roots, list):
+        roots = []
+    if not roots:
+        roots = [str(Path.home() / "Videos")]
+
+    failures: list[str] = []
+    for value in roots:
+        root_text = os.path.expandvars(os.path.expanduser(str(value))).strip()
+        if not root_text:
+            continue
+        root = Path(root_text)
+        if not root.is_absolute():
+            continue
+        staging = root / "ResolveDenoiseStaging"
+        try:
+            staging.mkdir(parents=True, exist_ok=True)
+            probe = staging / f".write_check_{uuid.uuid4().hex}"
+            with probe.open("xb"):
+                pass
+            probe.unlink()
+            return staging.resolve()
+        except OSError as exc:
+            failures.append(f"{staging}: {exc}")
+    detail = "\n".join(failures[:3])
+    suffix = f"\n{detail}" if detail else ""
+    raise ResolveBridgeError(
+        "助手无法在 Resolve 桥接配置的输出目录中建立临时渲染位置。"
+        f"请检查本机 Videos 输出目录权限。{suffix}"
+    )
+
+
 def _snapshot_render_settings(client: ResolveConsoleBridge) -> tuple[str | None, dict | None]:
     """Read current Deliver settings through a temporary, immediately deleted queue row."""
     job_id = client.call("project", "AddRenderJob")
@@ -408,8 +447,6 @@ def _restore_render_settings(client: ResolveConsoleBridge, snapshot: dict | None
     if output_name:
         output_path = Path(output_name)
         settings["CustomName"] = output_path.stem
-        if not snapshot.get("IsExportVideo"):
-            settings["AudioFormat"] = output_path.suffix.lstrip(".").lower()
     if settings:
         client.call("project", "SetRenderSettings", [settings])
     video_codec = str(snapshot.get("VideoCodec") or "")
@@ -455,6 +492,8 @@ def render_audio_track_to_wav(
         raise ResolveBridgeError("Resolve 正在执行其他渲染任务。请等当前渲染结束后再试。")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = _resolve_render_staging_dir()
+    staging_destination = staging_dir / f"ResolveDenoise_{uuid.uuid4().hex}.wav"
     page_before = str(client.call("resolve", "GetCurrentPage") or "")
     try:
         render_mode_before = client.call("project", "GetCurrentRenderMode")
@@ -498,17 +537,19 @@ def render_audio_track_to_wav(
                 raise ResolveBridgeError("Resolve 无法切换到单文件渲染模式。")
 
         ensure_same_timeline()
+        if not client.call("project", "LoadRenderPreset", ["Audio Only"]):
+            raise ResolveBridgeError("Resolve 无法加载内置“Audio Only”预设，未开始渲染。")
         if not client.call("project", "SetCurrentRenderFormatAndCodec", [audio_format, audio_codec]):
             raise ResolveBridgeError("Resolve 无法切换到 WAV / Linear PCM 输出格式。")
+        staging_target = str(staging_dir).replace("\\", "/").rstrip("/") + "/"
         render_settings = {
             "SelectAllFrames": False,
             "MarkIn": mark_in,
             "MarkOut": mark_out,
-            "TargetDir": destination.parent.as_posix(),
-            "CustomName": destination.stem,
+            "TargetDir": staging_target,
+            "CustomName": staging_destination.stem,
             "ExportVideo": False,
             "ExportAudio": True,
-            "AudioFormat": "wav",
             "AudioCodec": audio_codec,
             "AudioBitDepth": 16,
             "AudioSampleRate": 48000,
@@ -527,11 +568,11 @@ def render_audio_track_to_wav(
             raise ResolveBridgeError("Resolve 没有接受“纯音频 WAV”设置，已取消本次渲染。")
         job_target = str(job.get("TargetDir") or "")
         if not job_target:
-            raise ResolveBridgeError(f"Resolve 没有接受 WAV 输出目录：\n{destination.parent}")
+            raise ResolveBridgeError(f"Resolve 没有接受自动选择的 WAV 输出目录：\n{staging_dir}")
         if os.path.normcase(os.path.normpath(job_target)) != os.path.normcase(
-            os.path.normpath(str(destination.parent))
+            os.path.normpath(str(staging_dir))
         ):
-            raise ResolveBridgeError("Resolve 渲染任务的输出目录与临时 WAV 目录不一致，已取消渲染。")
+            raise ResolveBridgeError("Resolve 渲染任务没有使用助手自动选择的临时输出目录，已取消渲染。")
         if Path(str(job.get("OutputFilename") or "")).suffix.lower() != ".wav":
             raise ResolveBridgeError("Resolve 没有把本次音频导出设置成 WAV，已取消渲染。")
 
@@ -539,7 +580,7 @@ def render_audio_track_to_wav(
             progress("正在由 Resolve 导出 WAV", 0, False)
         ensure_same_timeline()
         if not client.call("project", "StartRendering", [[job_id]]):
-            raise ResolveBridgeError(f"Resolve 无法启动 WAV 导出任务。请检查输出目录：\n{destination.parent}")
+            raise ResolveBridgeError(f"Resolve 无法启动 WAV 导出任务。自动选择的输出目录：\n{staging_dir}")
 
         started = time.monotonic()
         while True:
@@ -560,18 +601,27 @@ def render_audio_track_to_wav(
         output_name = str(job.get("OutputFilename") or "")
         rendered = Path(output_name)
         if not rendered.is_absolute():
-            rendered = destination.parent / rendered
+            rendered = staging_dir / rendered
         if rendered.suffix.lower() != ".wav":
             rendered = rendered.with_suffix(".wav")
         if not rendered.is_file():
-            rendered = destination
+            rendered = staging_destination
         for _ in range(80):
             if rendered.is_file() and rendered.stat().st_size > 44:
                 break
             time.sleep(0.25)
         if not rendered.is_file() or rendered.stat().st_size <= 44:
             raise ResolveBridgeError(f"Resolve 报告渲染完成，但没有生成有效 WAV：\n{rendered}")
-        return {"path": rendered, "mark_in": mark_in, "mark_out": mark_out,
+
+        try:
+            shutil.move(str(rendered), str(destination))
+        except OSError as exc:
+            raise ResolveBridgeError(
+                f"WAV 已由 Resolve 导出，但无法移动到助手缓存目录：\n{destination}\n{exc}"
+            ) from exc
+        if not destination.is_file() or destination.stat().st_size <= 44:
+            raise ResolveBridgeError(f"WAV 已导出，但助手缓存中的文件无效：\n{destination}")
+        return {"path": destination, "mark_in": mark_in, "mark_out": mark_out,
                 "timeline_id": timeline_id}, clips
     finally:
         if job_id:
