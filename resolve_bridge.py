@@ -374,8 +374,11 @@ def _render_job(client: ResolveConsoleBridge, job_id: str) -> dict | None:
     return next((item for item in jobs if isinstance(item, dict) and item.get("JobId") == job_id), None)
 
 
-def _resolve_render_staging_dir() -> Path:
-    """Use Resolve's own Utility-script storage for the render, then move WAV into the app cache."""
+def _resolve_render_staging_dir(
+    client: ResolveConsoleBridge,
+    timeline_items: list[dict],
+) -> Path:
+    """Render beside online source media so Resolve can resolve the folder, then move WAV to app cache."""
     try:
         config = json.loads(BRIDGE_CONFIG.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -386,9 +389,31 @@ def _resolve_render_staging_dir() -> Path:
     if not roots:
         roots = [str(Path.home() / "Videos")]
 
-    # Resolve scripts commonly render to their Scripts:/Utility/<tool>/temp folder.
-    # This Utility root is also where this assistant's Workspace script is installed.
-    candidates = [RESOLVE_USER_SCRIPTS / "DenoiseAssistant" / "temp"]
+    # Source media folders are already known to the active Resolve project. Prefer those paths;
+    # the finished WAV is moved to ResolveCache immediately after rendering.
+    candidates: list[Path] = []
+    seen_source_dirs: set[str] = set()
+    for item in timeline_items[:3]:
+        if not isinstance(item, dict) or not item.get("__handle__"):
+            continue
+        try:
+            media_item = client.call(item, "GetMediaPoolItem")
+            properties = client.call(media_item, "GetClipProperty") if media_item else {}
+        except ResolveBridgeError:
+            continue
+        if not isinstance(properties, dict):
+            continue
+        media_path = str(properties.get("File Path") or "").strip()
+        clip_directory = str(properties.get("Clip Directory") or "").strip()
+        source_dir = Path(media_path).parent if media_path else Path(clip_directory)
+        if media_path or clip_directory:
+            key = os.path.normcase(os.path.normpath(str(source_dir)))
+            if key not in seen_source_dirs:
+                seen_source_dirs.add(key)
+                candidates.append(source_dir)
+
+    # Use Resolve's own Utility-script storage if the source media is read-only.
+    candidates.append(RESOLVE_USER_SCRIPTS / "DenoiseAssistant" / "temp")
     for value in roots:
         root_text = os.path.expandvars(os.path.expanduser(str(value))).strip()
         if root_text:
@@ -410,7 +435,7 @@ def _resolve_render_staging_dir() -> Path:
     detail = "\n".join(failures[:3])
     suffix = f"\n{detail}" if detail else ""
     raise ResolveBridgeError(
-        "助手无法在 Resolve Utility 临时目录或桥接输出目录中建立渲染位置。"
+        "助手无法在源素材目录、Resolve Utility 临时目录或桥接输出目录中建立渲染位置。"
         f"{suffix}"
     )
 
@@ -495,7 +520,7 @@ def render_audio_track_to_wav(
         raise ResolveBridgeError("Resolve 正在执行其他渲染任务。请等当前渲染结束后再试。")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    staging_dir = _resolve_render_staging_dir()
+    staging_dir = _resolve_render_staging_dir(client, items)
     staging_destination = staging_dir / f"ResolveDenoise_{uuid.uuid4().hex}.wav"
     page_before = str(client.call("resolve", "GetCurrentPage") or "")
     try:
