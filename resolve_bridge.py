@@ -291,9 +291,14 @@ class ResolveConsoleBridge:
                     if b"\n" in block:
                         break
         except (OSError, TimeoutError) as exc:
-            raise ResolveBridgeError(
-                "无法连接 Resolve。请打开项目，在 DaVinci Resolve 按 F6，粘贴已复制的启动代码并回车。"
-            ) from exc
+            if operation != "health":
+                message = (
+                    "Resolve 的 F6 桥接在执行操作时失去响应或连接中断。"
+                    "请先检查并关闭 Resolve 中的渲染提示，再点“刷新达芬奇”重试。"
+                )
+            else:
+                message = "无法连接 Resolve。请打开项目，在 DaVinci Resolve 按 F6，粘贴已复制的启动代码并回车。"
+            raise ResolveBridgeError(message) from exc
         if not chunks or len(chunks) > 1_048_576:
             raise ResolveBridgeError("Resolve 桥接没有返回有效响应。请在 F6 控制台重新运行启动代码。")
         try:
@@ -490,7 +495,7 @@ def render_audio_track_to_wav(
             "SelectAllFrames": False,
             "MarkIn": mark_in,
             "MarkOut": mark_out,
-            "TargetDir": str(destination.parent),
+            "TargetDir": destination.parent.as_posix(),
             "CustomName": destination.stem,
             "ExportVideo": False,
             "ExportAudio": True,

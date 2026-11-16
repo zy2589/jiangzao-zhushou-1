@@ -42,7 +42,7 @@ APP_NAME = "降噪助手"
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "DenoiseAssistant"
 CONFIG_FILE = CONFIG_DIR / "settings.json"
 SHOW_REQUEST_FILE = CONFIG_DIR / "show_assistant.request"
-RESOLVE_CACHE_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "DenoiseAssistant" / "ResolveCache"
+RESOLVE_CACHE_DIR = APP_DIR / "ResolveCache"
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".mts", ".m2ts", ".ts", ".mxf"}
 AUDIO_EXTS = {".wav", ".wave", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma", ".aiff", ".aif"}
 MEDIA_EXTS = VIDEO_EXTS | AUDIO_EXTS
@@ -264,7 +264,6 @@ def default_settings() -> dict:
         "deep_filter": find_program(("deep-filter", "deep_filter"), "deep-filter.exe"),
         "engine": "DeepFilterNet 人声降噪",
         "strength": 35,
-        "output_dir": str(Path.home() / "Downloads"),
     }
 
 
@@ -276,8 +275,7 @@ def load_settings() -> dict:
             settings.update(saved)
     except (OSError, json.JSONDecodeError):
         pass
-    if not str(settings.get("output_dir", "")).strip():
-        settings["output_dir"] = str(Path.home() / "Downloads")
+    settings.pop("output_dir", None)
     return settings
 
 
@@ -435,15 +433,13 @@ def process_video_file(source: Path, destination: Path, settings: dict) -> Path:
     return destination
 
 
-def process_media(source: Path, output_dir: Path | None, settings: dict) -> Path:
+def process_media(source: Path, settings: dict) -> Path:
     source = source.expanduser().resolve()
     if not source.is_file():
         raise ProcessError(f"找不到素材：{source}")
     if source.suffix.lower() not in MEDIA_EXTS:
         raise ProcessError(f"暂不支持这种文件格式：{source.suffix or '无扩展名'}")
-    out_dir = output_dir or Path(str(settings.get("output_dir", "")).strip()).expanduser()
-    if not out_dir or str(out_dir) == ".":
-        out_dir = source.parent
+    out_dir = source.parent
     if source.suffix.lower() in VIDEO_EXTS:
         destination = unique_output_path(source, out_dir, "_降噪")
         return process_video_file(source, destination, settings)
@@ -672,15 +668,12 @@ class DenoiseAssistant:
         file_buttons.pack(fill="x", padx=8, pady=2)
         self._button(file_buttons, "＋ 添加素材", self.add_files).pack(side="left", fill="x", expand=True)
         self._button(file_buttons, "移除选中", self.remove_selected).pack(side="left", fill="x", expand=True, padx=(6, 0))
-        self.output_var = tk.StringVar(value=self.settings.get("output_dir", ""))
         out_row = tk.Frame(media_card, bg=self.PANEL)
         out_row.pack(fill="x", padx=8, pady=(0, 4))
         tk.Label(out_row, text="输出位置", bg=self.PANEL, fg=self.MUTED,
                  font=("Microsoft YaHei UI", 9)).pack(side="left")
-        self.output_entry = tk.Entry(out_row, textvariable=self.output_var, bg=self.PANEL_ALT, fg=self.TEXT,
-                                     insertbackground=self.TEXT, relief="flat", font=("Microsoft YaHei UI", 9))
-        self.output_entry.pack(side="left", fill="x", expand=True, padx=6, ipady=1)
-        self._button(out_row, "浏览", self.choose_output_dir, compact=True).pack(side="right")
+        tk.Label(out_row, text="素材所在文件夹", bg=self.PANEL_ALT, fg=self.TEXT,
+                 anchor="w", font=("Microsoft YaHei UI", 9)).pack(side="left", fill="x", expand=True, padx=(8, 0), ipady=2)
         self.process_button = self._button(media_card, "生成本地降噪素材", self.start_processing, primary=True)
         self.process_button.pack(fill="x", padx=8, pady=(0, 3))
         local_progress_row = tk.Frame(media_card, bg=self.PANEL)
@@ -809,7 +802,6 @@ class DenoiseAssistant:
     def _save(self) -> None:
         self.settings["engine"] = self.engine_var.get() if hasattr(self, "engine_var") else self.settings.get("engine")
         self.settings["strength"] = int(self.strength_var.get()) if hasattr(self, "strength_var") else self.settings.get("strength", 35)
-        self.settings["output_dir"] = self.output_var.get().strip() if hasattr(self, "output_var") else self.settings.get("output_dir", "")
         try:
             save_settings(self.settings)
         except OSError:
@@ -886,12 +878,6 @@ class DenoiseAssistant:
         for item in self.files:
             kind = "视频" if item.suffix.lower() in VIDEO_EXTS else "音频"
             self.file_list.insert("end", f"{kind}   {item.name}")
-
-    def choose_output_dir(self) -> None:
-        folder = filedialog.askdirectory(title="选择输出文件夹", initialdir=self.output_var.get() or str(Path.home()))
-        if folder:
-            self.output_var.set(folder)
-            self._save()
 
     def configure_engines(self) -> None:
         dialog = tk.Toplevel(self.root)
@@ -1065,21 +1051,22 @@ class DenoiseAssistant:
             destination = unique_output_path(
                 Path(safe_timeline), output_dir, f"_A{track_index}_降噪", ".wav"
             )
-            with tempfile.TemporaryDirectory(prefix="denoise-resolve-export-") as work:
-                render_source = Path(work) / f"A{track_index}_timeline.wav"
+            render_source = unique_output_path(
+                Path(safe_timeline), output_dir, f"_A{track_index}_原始导出", ".wav"
+            )
 
-                def on_render_progress(stage: str, percent: int, indeterminate: bool) -> None:
-                    self.output_queue.put((
-                        "timeline_progress", (f"导出 A{track_index} WAV", round(percent * 0.35), indeterminate)
-                    ))
+            def on_render_progress(stage: str, percent: int, indeterminate: bool) -> None:
+                self.output_queue.put((
+                    "timeline_progress", (f"导出 A{track_index} WAV", round(percent * 0.35), indeterminate)
+                ))
 
-                render_info, _clips = render_audio_track_to_wav(
-                    client, timeline_name, track_index, render_source, on_render_progress
-                )
-                self.output_queue.put(("timeline_progress", ("DeepFilterNet 降噪", 38, True)))
-                self.output_queue.put(("status", f"正在降噪 Resolve 导出的 A{track_index} WAV…"))
-                output = process_audio_file(Path(render_info["path"]), destination, settings)
-                outputs.append(output)
+            render_info, _clips = render_audio_track_to_wav(
+                client, timeline_name, track_index, render_source, on_render_progress
+            )
+            self.output_queue.put(("timeline_progress", ("DeepFilterNet 降噪", 38, True)))
+            self.output_queue.put(("status", f"正在降噪 Resolve 导出的 A{track_index} WAV…"))
+            output = process_audio_file(Path(render_info["path"]), destination, settings)
+            outputs.append(output)
             self.output_queue.put(("timeline_progress", ("回填新音轨", 94, False)))
             placement = [{"record_frame": render_info["mark_in"], "source_track": track_index}]
             tracks = append_outputs_to_new_tracks(
@@ -1103,23 +1090,22 @@ class DenoiseAssistant:
         except ProcessError as exc:
             messagebox.showerror("引擎未就绪", str(exc), parent=self.root)
             return
-        output_dir = Path(self.output_var.get().strip()).expanduser() if self.output_var.get().strip() else None
         files = list(self.files)
         self.is_processing = True
         self.process_button.configure(state="disabled")
         self.resolve_process_button.configure(state="disabled")
         self._set_job_progress("local", 0, len(files))
         self.status_var.set(f"正在处理 0/{len(files)}…")
-        self.worker = threading.Thread(target=self._process_batch, args=(files, output_dir), daemon=True)
+        self.worker = threading.Thread(target=self._process_batch, args=(files,), daemon=True)
         self.worker.start()
 
-    def _process_batch(self, files: list[Path], output_dir: Path | None) -> None:
+    def _process_batch(self, files: list[Path]) -> None:
         successes: list[Path] = []
         failures: list[tuple[Path, str]] = []
         for index, source in enumerate(files, start=1):
             self.output_queue.put(("status", f"正在处理 {index}/{len(files)}：{source.name}"))
             try:
-                output = process_media(source, output_dir, self.settings)
+                output = process_media(source, self.settings)
                 successes.append(output)
             except Exception as exc:
                 failures.append((source, str(exc)))
