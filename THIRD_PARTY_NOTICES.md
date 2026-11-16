@@ -13,14 +13,6 @@
 
 本程序调用系统中安装的 `ffmpeg.exe` 完成音频采样率转换和视频封装，不在项目中分发 FFmpeg。FFmpeg 的源代码大部分使用 LGPL，部分可选组件使用 GPL；具体取决于所安装的构建及其启用组件。详见 [FFmpeg 官方许可证说明](https://ffmpeg.org/legal.html)。
 
-## Resolve Console Bridge
-
-- 项目：[ET-sec/resolve-console-bridge](https://github.com/ET-sec/resolve-console-bridge)
-- 版本：主分支快照，提交 `621368c9e175a571c9d3ff3b97864d878b210566`
-- 文件：`tools/resolve-console-bridge/`
-- 许可：MIT，许可全文见随附的 `tools/resolve-console-bridge/LICENSE`。
-- 本助手使用其 F6 控制台 Lua 桥接和本机签名回环协议；未启用 MCP 客户端。
-
 ## TkinterDnD2
 
 - 项目：[Eliav2/tkinterdnd2](https://github.com/Eliav2/tkinterdnd2)，基于 pmgagne/tkinterdnd2 的维护分支

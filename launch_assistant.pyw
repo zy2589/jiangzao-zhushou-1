@@ -4,7 +4,6 @@ import ctypes
 import os
 import runpy
 import traceback
-from datetime import datetime
 from pathlib import Path
 
 
@@ -48,16 +47,6 @@ def bring_existing_assistant_forward() -> None:
         pass
 
 
-def request_existing_assistant_show() -> None:
-    config_dir = Path(os.environ.get("APPDATA", Path.home())) / "DenoiseAssistant"
-    try:
-        config_dir.mkdir(parents=True, exist_ok=True)
-        request = config_dir / "show_assistant.request"
-        request.write_text(datetime.now().isoformat(timespec="milliseconds"), encoding="utf-8")
-    except OSError:
-        pass
-
-
 def acquire_single_instance() -> bool:
     global _INSTANCE_MUTEX
     if os.name != "nt":
@@ -71,7 +60,6 @@ def acquire_single_instance() -> bool:
         return True
     if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
         kernel32.CloseHandle(mutex)
-        request_existing_assistant_show()
         bring_existing_assistant_forward()
         return False
     _INSTANCE_MUTEX = mutex
@@ -98,7 +86,7 @@ def main() -> None:
             ctypes.windll.user32.MessageBoxW(
                 0,
                 f"降噪助手没有启动成功。\n\n错误日志：{log_path}\n\n{details[-2200:]}",
-                "达芬奇降噪助手 - 启动失败",
+                "降噪助手 - 启动失败",
                 0x10,
             )
         except Exception:
