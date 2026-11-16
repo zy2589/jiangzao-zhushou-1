@@ -1,24 +1,41 @@
 # 降噪助手
 
-Windows 本地音频与视频降噪工具。所有素材都在本机处理，不连接 DaVinci Resolve。
+Windows 本地音频与视频降噪工具，不连接 DaVinci Resolve。
 
-## 启动
+## 单文件版
 
-双击 `start_assistant.vbs` 或桌面/开始菜单中的“降噪助手”快捷方式。程序会使用隐藏窗口启动，不会额外弹出命令行。重复打开时会唤回已运行的助手，不会再启动第二个实例。
+双击 `dist\降噪助手.exe` 即可启动。EXE 内含 Python 运行环境、DeepFilterNet、FFmpeg、网页下载器和网页解析运行时，不要求另外安装这些依赖。首次启动会解压到 Windows 临时目录，启动时间稍长。
 
-## 本地降噪
+在 Windows x64 构建环境中运行：
 
-把音频或视频素材拖入列表，也可以点击“添加素材”。处理完成后，降噪结果保存在每个素材原来的文件夹中：
+```powershell
+python -m pip install pyinstaller
+python build_onefile.py
+```
 
-- 音频素材输出为降噪 WAV。
-- 视频素材保留画面，并把降噪后的声音替换进视频。
+构建需要 PATH 中有 `ffmpeg.exe` 和网络连接。构建脚本会从 yt-dlp 和 Deno 官方 GitHub Release 下载固定版本，并校验 SHA-256 后一并打入 EXE。该 EXE 会较大；当前 FFmpeg 构建采用 GPLv3 许可，分发时须同时提供适用的许可证和源码材料。详见 [第三方组件说明](THIRD_PARTY_NOTICES.md)。
 
-窗口默认置顶。可以在“引擎设置”里指定 FFmpeg 路径；降噪使用项目附带的 DeepFilterNet。强度滑块控制原声与降噪声的混合比例。
+## 本地素材降噪
 
-## 开源组件
+把音频或视频拖入列表，也可以点击“添加素材”。处理结果放在每个素材原来的文件夹中：
 
-- 降噪模型：[Rikorose/DeepFilterNet](https://github.com/Rikorose/DeepFilterNet)，项目附带官方 v0.5.6 Windows x64 命令行程序，许可为 Apache-2.0 或 MIT。
-- Windows 文件拖放：[Eliav2/tkinterdnd2](https://github.com/Eliav2/tkinterdnd2)，MIT。
-- FFmpeg：用于读取和封装音视频，由用户自行安装。程序会先查找 PATH 中的 `ffmpeg.exe`；若未找到，可在“引擎设置”中指定路径。
+- 音频素材输出为 `_降噪.wav`。
+- 视频素材保留画面，并替换为降噪后的声音。
 
-详细许可信息见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。设置保存在 `%APPDATA%\DenoiseAssistant\settings.json`。
+强度默认 75%。这个数值表示输出里降噪音频的混入比例；数值越高，降噪结果占比越大。若人声细节受影响，可降低强度。
+
+## 链接下载并降噪
+
+支持直接音视频文件链接，以及 yt-dlp 支持的公开视频页面链接。下载完成后会自动进入同一套 DeepFilterNet 降噪流程。下载素材和降噪结果放在：
+
+```text
+%USERPROFILE%\Downloads\降噪助手下载
+```
+
+网页链接需要联网；登录、地区限制、网站改动或平台保护可能导致下载失败。直接文件链接不需要网页解析器。
+
+## 源码版
+
+可以双击 `start_assistant.vbs` 启动源码版。需要 Python 3.13、Tkinter 和 FFmpeg；文件链接下载可以直接用，平台网页链接需要 `yt-dlp.exe` 与 `deno.exe`（单文件构建会自动下载并打包）。
+
+设置保存在 `%APPDATA%\DenoiseAssistant\settings.json`。

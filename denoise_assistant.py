@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import base64
 import json
+import mimetypes
 import os
 import queue
+import re
 import shutil
 import struct
 import subprocess
 import sys
 import tempfile
 import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import webbrowser
 import zlib
 from pathlib import Path
@@ -27,8 +33,8 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 APP_NAME = "降噪助手"
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "DenoiseAssistant"
 CONFIG_FILE = CONFIG_DIR / "settings.json"
-VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".mts", ".m2ts", ".ts", ".mxf"}
-AUDIO_EXTS = {".wav", ".wave", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma", ".aiff", ".aif"}
+VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".mts", ".m2ts", ".ts", ".mxf", ".mpeg", ".mpg", ".wmv", ".3gp"}
+AUDIO_EXTS = {".wav", ".wave", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma", ".aiff", ".aif", ".mka"}
 MEDIA_EXTS = VIDEO_EXTS | AUDIO_EXTS
 
 
@@ -234,11 +240,13 @@ class RoundedButton(tk.Canvas):
 
 
 def find_program(names: tuple[str, ...], bundled_name: str) -> str:
+    bundled = APP_DIR / "tools" / bundled_name
+    if getattr(sys, "frozen", False) and bundled.is_file():
+        return str(bundled)
     for name in names:
         found = shutil.which(name)
         if found:
             return found
-    bundled = APP_DIR / "tools" / bundled_name
     return str(bundled) if bundled.is_file() else ""
 
 
@@ -247,7 +255,7 @@ def default_settings() -> dict:
         "ffmpeg": find_program(("ffmpeg",), "ffmpeg.exe"),
         "deep_filter": find_program(("deep-filter", "deep_filter"), "deep-filter.exe"),
         "engine": "DeepFilterNet 人声降噪",
-        "strength": 35,
+        "strength": 75,
     }
 
 
@@ -259,6 +267,12 @@ def load_settings() -> dict:
             settings.update(saved)
     except (OSError, json.JSONDecodeError):
         pass
+    if getattr(sys, "frozen", False):
+        # One-file bundles unpack to a new temporary directory each launch.
+        # Ignore any saved paths from a previous app installation and use the
+        # copies shipped inside this executable.
+        settings["ffmpeg"] = str(APP_DIR / "tools" / "ffmpeg.exe")
+        settings["deep_filter"] = str(APP_DIR / "tools" / "deep-filter.exe")
     settings.pop("output_dir", None)
     return settings
 
@@ -295,6 +309,9 @@ def run_command(args: list[str], *, timeout: int | None = None) -> subprocess.Co
 
 
 def ffmpeg_path(settings: dict) -> str:
+    bundled = APP_DIR / "tools" / "ffmpeg.exe"
+    if getattr(sys, "frozen", False) and bundled.is_file():
+        return str(bundled)
     path = str(settings.get("ffmpeg", "")).strip() or find_program(("ffmpeg",), "ffmpeg.exe")
     if not path or not Path(path).is_file():
         raise ProcessError("没有找到 ffmpeg.exe。请在“引擎设置”中选择 ffmpeg.exe。")
@@ -302,10 +319,31 @@ def ffmpeg_path(settings: dict) -> str:
 
 
 def deep_filter_path(settings: dict) -> str:
+    bundled = APP_DIR / "tools" / "deep-filter.exe"
+    if getattr(sys, "frozen", False) and bundled.is_file():
+        return str(bundled)
     path = str(settings.get("deep_filter", "")).strip() or find_program(("deep-filter", "deep_filter"), "deep-filter.exe")
     if not path or not Path(path).is_file():
         raise ProcessError("没有找到 DeepFilterNet 命令行程序。请在“引擎设置”中选择 deep-filter.exe。")
     return path
+
+
+def yt_dlp_path() -> str:
+    for path in (APP_DIR / "tools" / "yt-dlp.exe", APP_DIR / "build" / "dependencies" / "yt-dlp.exe"):
+        if path.is_file():
+            return str(path)
+    found = shutil.which("yt-dlp.exe") or shutil.which("yt-dlp")
+    if found:
+        return found
+    raise ProcessError("没有找到内置网页下载器 yt-dlp.exe。")
+
+
+def deno_path() -> str:
+    for path in (APP_DIR / "tools" / "deno.exe", APP_DIR / "build" / "dependencies" / "deno.exe"):
+        if path.is_file():
+            return str(path)
+    found = shutil.which("deno.exe") or shutil.which("deno")
+    return found or ""
 
 
 def unique_output_path(source: Path, output_dir: Path, suffix: str, extension: str | None = None) -> Path:
@@ -317,6 +355,157 @@ def unique_output_path(source: Path, output_dir: Path, suffix: str, extension: s
         candidate = output_dir / f"{source.stem}{suffix}_{index}{ext}"
         index += 1
     return candidate
+
+
+def _download_folder() -> Path:
+    return Path.home() / "Downloads" / "降噪助手下载"
+
+
+def _url_is_direct_media(url: str) -> bool:
+    parsed = urllib.parse.urlsplit(url)
+    suffix = Path(urllib.parse.unquote(parsed.path)).suffix.lower()
+    if suffix in MEDIA_EXTS:
+        return True
+    try:
+        request = urllib.request.Request(
+            url, method="HEAD", headers={"User-Agent": "Mozilla/5.0 DenoiseAssistant/1.0"}
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return response.headers.get_content_type().lower().startswith(("audio/", "video/"))
+    except Exception:
+        return False
+
+
+def _download_direct_media(url: str, report: Callable[[int | None, str], None]) -> Path:
+    folder = _download_folder()
+    folder.mkdir(parents=True, exist_ok=True)
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0 DenoiseAssistant/1.0"}
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        headers = response.headers
+        raw_name = headers.get_filename()
+        if not raw_name:
+            raw_name = urllib.parse.unquote(Path(urllib.parse.urlsplit(response.geturl()).path).name)
+        raw_name = raw_name.replace("\\", "/").rsplit("/", 1)[-1]
+        raw_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", raw_name).strip(" .")[:160]
+        content_type = headers.get_content_type().lower()
+        suffix = Path(raw_name).suffix.lower()
+        if suffix not in MEDIA_EXTS:
+            guessed = mimetypes.guess_extension(content_type) or ""
+            suffix = guessed.lower()
+            raw_name = f"{Path(raw_name).stem or '下载素材'}{suffix}"
+        if suffix not in MEDIA_EXTS:
+            raise ProcessError(f"这个链接没有返回支持的音视频文件（{content_type}）。")
+        source = unique_output_path(Path(raw_name), folder, "_下载")
+        total = int(headers.get("Content-Length") or 0)
+        received = 0
+        last_report = 0.0
+        try:
+            with source.open("wb") as output:
+                while chunk := response.read(1024 * 1024):
+                    output.write(chunk)
+                    received += len(chunk)
+                    now = time.monotonic()
+                    if now - last_report >= 0.4:
+                        percent = round(received * 100 / total) if total > 0 else None
+                        report(percent, "直链下载")
+                        last_report = now
+        except Exception:
+            source.unlink(missing_ok=True)
+            raise
+    report(100, "下载完成")
+    return source
+
+
+def _download_platform_media(
+    url: str, settings: dict, report: Callable[[int | None, str], None]
+) -> Path:
+    downloader = yt_dlp_path()
+    ffmpeg = ffmpeg_path(settings)
+    deno = deno_path()
+    folder = _download_folder()
+    folder.mkdir(parents=True, exist_ok=True)
+    output_template = str(folder / "%(title).140B [%(id)s] %(epoch)s.%(ext)s")
+    args = [
+        downloader, "--no-playlist", "--no-colors", "--newline",
+        "--format", "bestvideo*+bestaudio/best",
+        "--merge-output-format", "mkv",
+        "--ffmpeg-location", ffmpeg,
+        "--output", output_template,
+        "--print", "after_move:filepath",
+        "--remote-components", "ejs:github",
+    ]
+    if deno:
+        args.extend(("--js-runtimes", f"deno:{deno}"))
+    args.append(url)
+
+    download_started_at = time.time()
+    try:
+        process = subprocess.Popen(
+            args, cwd=str(APP_DIR), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except OSError as exc:
+        raise ProcessError(f"无法启动网页下载器：{exc}") from exc
+
+    output_lines: list[str] = []
+    printed_paths: list[Path] = []
+    if process.stdout is not None:
+        for line in process.stdout:
+            text_line = line.strip()
+            if not text_line:
+                continue
+            output_lines.append(text_line)
+            if len(output_lines) > 80:
+                output_lines.pop(0)
+            possible_path = Path(text_line.strip('"'))
+            if possible_path.is_file():
+                printed_paths.append(possible_path)
+            match = re.search(r"(\d{1,3}(?:\.\d+)?)%", text_line)
+            if match:
+                report(max(0, min(100, round(float(match.group(1))))), "网页下载")
+            elif any(stage in text_line.lower() for stage in ("merging", "extracting", "post-process")):
+                report(None, "合并下载素材")
+    result = process.wait()
+    if result != 0:
+        detail = "\n".join(output_lines[-12:]) or f"下载器退出代码 {result}"
+        raise ProcessError(f"网页素材下载失败：\n{detail[-1800:]}")
+
+    for candidate in reversed(printed_paths):
+        if candidate.is_file() and candidate.suffix.lower() in MEDIA_EXTS:
+            report(100, "下载完成")
+            return candidate
+    candidates = sorted(
+        (path for path in folder.iterdir()
+         if path.is_file() and path.suffix.lower() in MEDIA_EXTS
+         and path.stat().st_mtime >= download_started_at - 1),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if candidates:
+        report(100, "下载完成")
+        return candidates[0]
+    raise ProcessError("网页下载器结束了，但没有找到下载好的音视频文件。")
+
+
+def download_media_link(
+    url: str, settings: dict, report: Callable[[int | None, str], None]
+) -> Path:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise ProcessError("请粘贴以 http:// 或 https:// 开头的音视频链接。")
+    if _url_is_direct_media(url):
+        try:
+            return _download_direct_media(url, report)
+        except (OSError, ValueError, urllib.error.URLError, ProcessError) as exc:
+            report(None, "直链下载失败，尝试网页解析")
+            try:
+                return _download_platform_media(url, settings, report)
+            except Exception as fallback_error:
+                raise ProcessError(f"直链下载失败：{exc}\n网页解析也失败：{fallback_error}") from fallback_error
+    return _download_platform_media(url, settings, report)
 
 
 def _prepare_wav(source: Path, destination: Path, ffmpeg: str) -> None:
@@ -446,8 +635,8 @@ class DenoiseAssistant:
 
     def _configure_window(self) -> None:
         self.root.title("降噪助手")
-        self.root.geometry("390x626")
-        self.root.minsize(370, 586)
+        self.root.geometry("390x662")
+        self.root.minsize(370, 622)
         self.root.resizable(False, False)
         self.root.configure(bg=self.BG)
         self.root.attributes("-topmost", True)
@@ -510,7 +699,7 @@ class DenoiseAssistant:
 
         strength_row = tk.Frame(engine_card, bg=self.PANEL)
         strength_row.pack(fill="x", padx=8, pady=(0, 2))
-        self.strength_var = tk.IntVar(value=max(0, min(100, int(self.settings.get("strength", 35)))))
+        self.strength_var = tk.IntVar(value=max(0, min(100, int(self.settings.get("strength", 75)))))
         self.strength_label = tk.Label(strength_row, text="净化强度", bg=self.PANEL, fg=self.TEXT,
                                        font=("Microsoft YaHei UI", 9, "bold"))
         self.strength_label.pack(side="left")
@@ -533,7 +722,7 @@ class DenoiseAssistant:
         self.strength_value_label.pack(side="left")
         self._button(strength_stepper, "+", lambda: self._adjust_strength(1), compact=True)\
             .pack(side="left", padx=(1, 2), pady=2)
-        tk.Label(engine_card, text="听感未过度降噪可降低强度；百分比不代表相同的降噪量。",
+        tk.Label(engine_card, text="数值表示降噪音频的混入比例；越高降噪越明显，过高可能削弱人声细节。",
                  bg=self.PANEL, fg=self.MUTED, wraplength=345, justify="left",
                  font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=8, pady=(0, 3))
         self._update_strength()
@@ -550,6 +739,18 @@ class DenoiseAssistant:
         tk.Label(media_card, text="拖入或添加音视频素材；视频保留画面并替换音轨。",
                  bg=self.PANEL, fg=self.MUTED, justify="left", wraplength=345,
                  font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=8, pady=(0, 4))
+
+        link_row = tk.Frame(media_card, bg=self.PANEL)
+        link_row.pack(fill="x", padx=8, pady=(0, 4))
+        tk.Label(link_row, text="链接", bg=self.PANEL, fg=self.MUTED,
+                 font=("Microsoft YaHei UI", 9)).pack(side="left", padx=(0, 6))
+        self.link_entry = tk.Entry(link_row, bg=self.PANEL_ALT, fg=self.TEXT,
+                                   insertbackground=self.TEXT, relief="flat",
+                                   font=("Microsoft YaHei UI", 9))
+        self.link_entry.pack(side="left", fill="x", expand=True, ipady=4)
+        self.link_entry.bind("<Return>", lambda _event: self.start_link_processing())
+        self.link_button = self._button(link_row, "下载并降噪", self.start_link_processing, primary=True)
+        self.link_button.pack(side="right", padx=(6, 0))
 
         list_holder = tk.Frame(media_card, bg=self.PANEL_ALT, highlightbackground=self.BORDER, highlightthickness=1)
         list_holder.pack(fill="x", padx=8)
@@ -659,7 +860,7 @@ class DenoiseAssistant:
 
     def _save(self) -> None:
         self.settings["engine"] = self.engine_var.get() if hasattr(self, "engine_var") else self.settings.get("engine")
-        self.settings["strength"] = int(self.strength_var.get()) if hasattr(self, "strength_var") else self.settings.get("strength", 35)
+        self.settings["strength"] = int(self.strength_var.get()) if hasattr(self, "strength_var") else self.settings.get("strength", 75)
         try:
             save_settings(self.settings)
         except OSError:
@@ -813,6 +1014,49 @@ class DenoiseAssistant:
         self.worker = threading.Thread(target=self._process_batch, args=(files,), daemon=True)
         self.worker.start()
 
+    def start_link_processing(self) -> None:
+        if self.is_processing:
+            return
+        url = self.link_entry.get().strip()
+        if not url:
+            messagebox.showinfo("添加链接", "请粘贴音视频文件直链或公开视频页面链接。", parent=self.root)
+            self.link_entry.focus_set()
+            return
+        self._save()
+        try:
+            ffmpeg_path(self.settings)
+            deep_filter_path(self.settings)
+        except ProcessError as exc:
+            messagebox.showerror("引擎未就绪", str(exc), parent=self.root)
+            return
+        self.is_processing = True
+        self.process_button.configure(state="disabled")
+        self.link_button.configure(state="disabled")
+        self._set_link_progress(None, "准备下载")
+        self.status_var.set("正在下载链接素材…")
+        self.worker = threading.Thread(
+            target=self._download_and_process_link,
+            args=(url, dict(self.settings)),
+            daemon=True,
+        )
+        self.worker.start()
+
+    def _download_and_process_link(self, url: str, settings: dict) -> None:
+        successes: list[Path] = []
+        failures: list[tuple[Path, str]] = []
+
+        def report(percent: int | None, stage: str) -> None:
+            self.output_queue.put(("link_progress", (percent, stage)))
+
+        try:
+            source = download_media_link(url, settings, report)
+            self.output_queue.put(("link_downloaded", source))
+            report(None, "下载完成，正在降噪")
+            successes.append(process_media(source, settings))
+        except Exception as exc:
+            failures.append((Path("链接素材"), str(exc)))
+        self.output_queue.put(("done", (successes, failures)))
+
     def _process_batch(self, files: list[Path]) -> None:
         successes: list[Path] = []
         failures: list[tuple[Path, str]] = []
@@ -834,10 +1078,18 @@ class DenoiseAssistant:
                     self.status_var.set(value)
                 elif kind == "job_progress":
                     self._set_job_progress(*value)
+                elif kind == "link_progress":
+                    self._set_link_progress(*value)
+                elif kind == "link_downloaded":
+                    self._add_media_paths((str(value),))
                 elif kind == "done":
                     successes, failures = value
                     self.is_processing = False
                     self.process_button.configure(state="normal")
+                    self.link_button.configure(state="normal")
+                    if self.local_progressbar.cget("mode") == "indeterminate":
+                        self.local_progressbar.stop()
+                        self.local_progressbar.configure(mode="determinate", maximum=100, value=0)
                     total = len(successes) + len(failures)
                     self._set_job_progress(total, total)
                     if failures:
@@ -857,6 +1109,22 @@ class DenoiseAssistant:
         except queue.Empty:
             pass
         self.root.after(150, self._drain_queue)
+
+    def _set_link_progress(self, percent: int | None, stage: str) -> None:
+        bar = self.local_progressbar
+        if percent is None:
+            if bar.cget("mode") != "indeterminate":
+                bar.stop()
+                bar.configure(mode="indeterminate", maximum=100, value=0)
+                bar.start(12)
+            self.local_progress_label.configure(text=stage)
+            return
+        if bar.cget("mode") == "indeterminate":
+            bar.stop()
+            bar.configure(mode="determinate", maximum=100, value=0)
+        percent = max(0, min(100, int(percent)))
+        bar.configure(maximum=100, value=percent)
+        self.local_progress_label.configure(text=f"{stage} {percent}%")
 
 def main() -> int:
     try:

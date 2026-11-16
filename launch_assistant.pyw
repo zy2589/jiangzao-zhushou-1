@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import os
 import runpy
+import sys
 import traceback
 from pathlib import Path
 
@@ -69,7 +70,8 @@ def acquire_single_instance() -> bool:
 def main() -> None:
     if not acquire_single_instance():
         return
-    app_script = Path(__file__).resolve().with_name("denoise_assistant.py")
+    app_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    app_script = app_root / "denoise_assistant.py"
     try:
         runpy.run_path(str(app_script), run_name="__main__")
     except Exception:
